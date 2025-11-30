@@ -1,9 +1,6 @@
 """
-camera_face_eyes.py
-Protótipo final -> detecta rosto, olhos, cabeça (head-pose), e alerta se dorme ou perde foco.
-Requisitos: Python 3.12, mediapipe, opencv-python, numpy, pygame (opcional para MP3)
-Rode: python camera_face_eyes.py
-Aperte 'q' para sair.
+camera_face_eyes_hud.py
+Versão com HUD melhorado e mais visual
 """
 
 import cv2
@@ -19,12 +16,11 @@ from ctypes import wintypes
 import math
 import os
 
-# -------------------- WinAPI helpers (ctypes) --------------------
+# -------------------- WinAPI helpers --------------------
 user32 = ctypes.WinDLL('user32', use_last_error=True)
 kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
 
 SW_MINIMIZE = 6
-SW_RESTORE = 9
 HWND_TOPMOST = -1
 HWND_NOTOPMOST = -2
 SWP_NOMOVE = 0x0002
@@ -39,33 +35,17 @@ ShowWindow = user32.ShowWindow
 ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
 ShowWindow.restype = wintypes.BOOL
 
-# WNDENUMPROC callback type (correct approach)
 WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 EnumWindows = user32.EnumWindows
-EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
-EnumWindows.restype = wintypes.BOOL
-
 GetWindowText = user32.GetWindowTextW
-GetWindowText.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-GetWindowText.restype = ctypes.c_int
-
 GetWindowTextLength = user32.GetWindowTextLengthW
-GetWindowTextLength.argtypes = [wintypes.HWND]
-GetWindowTextLength.restype = ctypes.c_int
-
 IsWindowVisible = user32.IsWindowVisible
-IsWindowVisible.argtypes = [wintypes.HWND]
-IsWindowVisible.restype = wintypes.BOOL
-
 GetForegroundWindow = user32.GetForegroundWindow
-GetForegroundWindow.restype = wintypes.HWND
 
-# LASTINPUTINFO structure for idle detection
 class LASTINPUTINFO(ctypes.Structure):
     _fields_ = [('cbSize', ctypes.c_uint), ('dwTime', ctypes.c_uint)]
 
 def get_idle_seconds():
-    """Retorna segundos desde o último input (mouse/teclado) no Windows."""
     lii = LASTINPUTINFO()
     lii.cbSize = ctypes.sizeof(LASTINPUTINFO)
     if not user32.GetLastInputInfo(ctypes.byref(lii)):
@@ -74,7 +54,6 @@ def get_idle_seconds():
     return millis / 1000.0
 
 def get_foreground_window_title():
-    """Retorna o título da janela em primeiro plano (string)."""
     try:
         hwnd = GetForegroundWindow()
         length = GetWindowTextLength(hwnd)
@@ -84,16 +63,7 @@ def get_foreground_window_title():
     except Exception:
         return ""
 
-def set_window_topmost_by_name(win_name, top=True):
-    """Procura janela por título exato e seta topmost ou notopmost."""
-    hwnd = user32.FindWindowW(None, win_name)
-    if hwnd:
-        SetWindowPos(hwnd, HWND_TOPMOST if top else HWND_NOTOPMOST, 0,0,0,0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
-        return True
-    return False
-
 def minimize_all_other_windows(except_hwnd=None, exclude_title_contains=None):
-    """Minimiza janelas visíveis exceto a nossa (passar exceção) e títulos contendo exclude_title_contains."""
     def callback(hwnd, lParam):
         try:
             if not IsWindowVisible(hwnd):
@@ -102,9 +72,7 @@ def minimize_all_other_windows(except_hwnd=None, exclude_title_contains=None):
             buff = ctypes.create_unicode_buffer(length + 1)
             GetWindowText(hwnd, buff, length + 1)
             title = buff.value or ""
-            if not title:
-                return True
-            if except_hwnd and hwnd == except_hwnd:
+            if not title or (except_hwnd and hwnd == except_hwnd):
                 return True
             if exclude_title_contains and exclude_title_contains.lower() in title.lower():
                 return True
@@ -116,38 +84,40 @@ def minimize_all_other_windows(except_hwnd=None, exclude_title_contains=None):
     EnumWindows(enum_proc, 0)
 
 # -------------------- Configurações --------------------
-LEFT_EYE_IDX  = [33, 160, 158, 133, 153, 144]
+LEFT_EYE_IDX = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE_IDX = [362, 385, 387, 263, 373, 380]
 
-EAR_THRESHOLD = 0.20       # abaixo disso consideramos olho "fechado"
-CONSEC_FRAMES = 3          # frames consecutivos para confirmar "fechado"
-SMOOTH_WINDOW = 5          # média móvel de EAR em N frames
+EAR_THRESHOLD = 0.25
+CONSEC_FRAMES = 1
+SMOOTH_WINDOW = 5
 LOG_CSV = "eye_log.csv"
 
-# head-pose thresholds
 PITCH_CLOSE_THRESHOLD = 12.0
 YAW_CLOSE_THRESHOLD = 25.0
 EYE_CLOSED_CONSEC_FRAMES = CONSEC_FRAMES
 
-# alert behavior
-ALERT_SECONDS = 15
+ALERT_SECONDS = 10
+PHONE_ALERT_SECONDS = 8
 MINIMIZE_WINDOWS_ON_ALERT = True
-ALERT_AUDIO_FILE = "alert.mp3"   # opcional
-ALERT_IMAGE_FILE = "alert.png"   # opcional
+ALERT_AUDIO_FILE = "alert.mp3"
+ALERT_IMAGE_FILE = "Acorda.png"
 
-# phone detection timing
-phone_start_time = None
-PHONE_ALERT_SECONDS = 8   # segundos antes de alertar "no celular"
+# -------------------- HUD Config --------------------
+HUD_BG_COLOR = (20, 20, 30)
+HUD_ACCENT_OK = (0, 255, 150)
+HUD_ACCENT_WARNING = (0, 165, 255)
+HUD_ACCENT_DANGER = (0, 0, 255)
 
 # -------------------- Inicializações --------------------
 mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False,
-                                  max_num_faces=1,
-                                  refine_landmarks=True,
-                                  min_detection_confidence=0.5,
-                                  min_tracking_confidence=0.5)
+face_mesh = mp_face_mesh.FaceMesh(
+    static_image_mode=False,
+    max_num_faces=1,
+    refine_landmarks=True,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
 
-# tenta carregar pygame (para MP3). se não disponível, fallback para winsound Beep
 try:
     import pygame
     pygame.mixer.pre_init(44100, -16, 2, 2048)
@@ -157,7 +127,6 @@ try:
 except Exception:
     PYGAME_AVAILABLE = False
 
-# tenta carregar imagem de alerta (opcional)
 _alert_img = None
 if os.path.exists(ALERT_IMAGE_FILE):
     try:
@@ -165,43 +134,36 @@ if os.path.exists(ALERT_IMAGE_FILE):
         if _tmp is not None:
             _alert_img = _tmp
     except Exception:
-        _alert_img = None
+        pass
 
-# inicializa câmera
 cap = cv2.VideoCapture(0)
 if not cap.isOpened():
-    raise SystemExit("Erro: não consegui abrir a câmera. Verifique índice ou drivers.")
+    raise SystemExit("Erro: não consegui abrir a câmera.")
 
 ear_window = deque(maxlen=SMOOTH_WINDOW)
+ear_history = deque(maxlen=100)  # para gráfico
 consec_closed = 0
-
-# alerta control vars
 closed_start_time = None
 alert_played = False
+phone_start_time = None
 
-# cria CSV (cabeçalho)
 with open(LOG_CSV, "w", newline="", encoding="utf-8") as f:
     writer = csv.writer(f)
     writer.writerow(["timestamp", "ear", "pitch", "yaw", "is_phone", "eyes_open"])
 
-# -------------------- Funções utilitárias --------------------
+# -------------------- Funções --------------------
 def eye_aspect_ratio(eye_points):
     p1, p2, p3, p4, p5, p6 = eye_points
     A = np.linalg.norm(p2 - p6)
     B = np.linalg.norm(p3 - p5)
     C = np.linalg.norm(p1 - p4)
-    ear = (A + B) / (2.0 * (C + 1e-8))
-    return ear
+    return (A + B) / (2.0 * (C + 1e-8))
 
-# solvePnP model points (approx)
 PNP_IDX = [1, 152, 33, 263, 61, 291]
 MODEL_POINTS_3D = np.array([
-    (0.0, 0.0, 0.0),
-    (0.0, -63.6, -12.5),
-    (-43.3, 32.7, -26.0),
-    (43.3, 32.7, -26.0),
-    (-28.9, -28.9, -24.1),
-    (28.9, -28.9, -24.1)
+    (0.0, 0.0, 0.0), (0.0, -63.6, -12.5),
+    (-43.3, 32.7, -26.0), (43.3, 32.7, -26.0),
+    (-28.9, -28.9, -24.1), (28.9, -28.9, -24.1)
 ], dtype=np.float32)
 
 def estimate_head_pose(landmarks, img_w, img_h):
@@ -212,37 +174,36 @@ def estimate_head_pose(landmarks, img_w, img_h):
                               [0, focal_length, center[1]],
                               [0, 0, 1]], dtype=np.float64)
     dist_coeffs = np.zeros((4,1))
-    success, rotation_vec, translation_vec = cv2.solvePnP(MODEL_POINTS_3D, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE)
+    success, rotation_vec, _ = cv2.solvePnP(MODEL_POINTS_3D, image_points, camera_matrix, dist_coeffs)
     if not success:
         return 0.0, 0.0, 0.0
     rmat, _ = cv2.Rodrigues(rotation_vec)
     sy = math.sqrt(rmat[0,0]*rmat[0,0] + rmat[1,0]*rmat[1,0])
-    singular = sy < 1e-6
-    if not singular:
-        x = math.atan2(rmat[2,1], rmat[2,2])
-        y = math.atan2(-rmat[2,0], sy)
-        z = math.atan2(rmat[1,0], rmat[0,0])
-    else:
+    if sy < 1e-6:
         x = math.atan2(-rmat[1,2], rmat[1,1])
         y = math.atan2(-rmat[2,0], sy)
         z = 0
-    pitch = math.degrees(x)
-    yaw = math.degrees(y)
-    roll = math.degrees(z)
-    return yaw, pitch, roll
+    else:
+        x = math.atan2(rmat[2,1], rmat[2,2])
+        y = math.atan2(-rmat[2,0], sy)
+        z = math.atan2(rmat[1,0], rmat[0,0])
+    return math.degrees(y), math.degrees(x), math.degrees(z)
 
 def detect_not_focused(landmarks, w, h, ear_smoothed):
     score = 0.0
     reasons = []
-    yaw = pitch = roll = 0.0
+    yaw = pitch = 0.0
     try:
         yaw, pitch, roll = estimate_head_pose(landmarks, w, h)
         if abs(yaw) > 20:
-            score += 0.4; reasons.append(f"yaw={yaw:.1f}")
+            score += 0.4
+            reasons.append(f"yaw={yaw:.1f}")
         if pitch > 15:
-            score += 0.4; reasons.append(f"pitch={pitch:.1f}")
+            score += 0.4
+            reasons.append(f"pitch={pitch:.1f}")
     except Exception:
         pass
+    
     try:
         left_eye_c = np.mean([landmarks[i] for i in LEFT_EYE_IDX], axis=0)
         right_eye_c = np.mean([landmarks[i] for i in RIGHT_EYE_IDX], axis=0)
@@ -251,23 +212,23 @@ def detect_not_focused(landmarks, w, h, ear_smoothed):
         dx = (nose[0] - eyes_center[0]) / w
         dy = (nose[1] - eyes_center[1]) / h
         if abs(dx) > 0.12:
-            score += 0.15; reasons.append(f"nose_dx={dx:.2f}")
+            score += 0.15
         if dy > 0.08:
-            score += 0.15; reasons.append(f"nose_dy={dy:.2f}")
+            score += 0.15
     except Exception:
         pass
+    
     idle_sec = get_idle_seconds()
     if idle_sec > 5:
-        score += 0.1; reasons.append(f"idle={int(idle_sec)}s")
-    fg = get_foreground_window_title()
-    main_title = "Face+Eyes Detector"
-    if fg and main_title.lower() not in fg.lower():
-        score += 0.1; reasons.append(f"fg='{fg[:30]}'")
+        score += 0.1
+        reasons.append(f"idle={int(idle_sec)}s")
+    
     if ear_smoothed is not None and pitch > 12 and ear_smoothed > 0.18:
-        score += 0.2; reasons.append("open_eyes_head_down")
+        score += 0.2
+        reasons.append("olhos_abertos_cabeca_baixa")
+    
     score = min(1.0, score)
-    is_phone = score >= 0.4
-    return is_phone, score, ";".join(reasons), yaw, pitch
+    return score >= 0.4, score, ";".join(reasons), yaw, pitch
 
 def play_alert_audio_once():
     global alert_played
@@ -286,15 +247,127 @@ def play_alert_audio_once():
             pass
     alert_played = True
 
-# -------------------- Loop principal --------------------
-try:
-    # variables for phone alert timing
-    phone_start_time = None
+# -------------------- HUD Drawing Functions --------------------
+def draw_rounded_rect(img, pt1, pt2, color, thickness, radius=10):
+    """Desenha retângulo com cantos arredondados"""
+    x1, y1 = pt1
+    x2, y2 = pt2
+    
+    # Linhas
+    cv2.line(img, (x1+radius, y1), (x2-radius, y1), color, thickness)
+    cv2.line(img, (x1+radius, y2), (x2-radius, y2), color, thickness)
+    cv2.line(img, (x1, y1+radius), (x1, y2-radius), color, thickness)
+    cv2.line(img, (x2, y1+radius), (x2, y2-radius), color, thickness)
+    
+    # Cantos
+    cv2.ellipse(img, (x1+radius, y1+radius), (radius, radius), 180, 0, 90, color, thickness)
+    cv2.ellipse(img, (x2-radius, y1+radius), (radius, radius), 270, 0, 90, color, thickness)
+    cv2.ellipse(img, (x1+radius, y2-radius), (radius, radius), 90, 0, 90, color, thickness)
+    cv2.ellipse(img, (x2-radius, y2-radius), (radius, radius), 0, 0, 90, color, thickness)
 
+def draw_status_panel(frame, x, y, w, h, title, value, status_color, details=""):
+    """Desenha painel de status moderno"""
+    # Background semi-transparente
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x, y), (x+w, y+h), HUD_BG_COLOR, -1)
+    cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+    
+    # Borda colorida
+    draw_rounded_rect(frame, (x, y), (x+w, y+h), status_color, 2, radius=8)
+    
+    # Título
+    cv2.putText(frame, title, (x+10, y+25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
+    
+    # Valor principal
+    cv2.putText(frame, value, (x+10, y+55), cv2.FONT_HERSHEY_DUPLEX, 0.8, status_color, 2, cv2.LINE_AA)
+    
+    # Detalhes
+    if details:
+        cv2.putText(frame, details, (x+10, y+h-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1, cv2.LINE_AA)
+
+def draw_progress_bar(frame, x, y, w, h, progress, color, bg_color=(50, 50, 60)):
+    """Barra de progresso animada"""
+    # Background
+    cv2.rectangle(frame, (x, y), (x+w, y+h), bg_color, -1)
+    
+    # Progresso
+    fill_w = int(w * progress)
+    if fill_w > 0:
+        cv2.rectangle(frame, (x, y), (x+fill_w, y+h), color, -1)
+    
+    # Borda
+    cv2.rectangle(frame, (x, y), (x+w, y+h), color, 1)
+
+def draw_ear_graph(frame, x, y, w, h, ear_history):
+    """Gráfico de EAR em tempo real"""
+    if len(ear_history) < 2:
+        return
+    
+    # Background
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x, y), (x+w, y+h), HUD_BG_COLOR, -1)
+    cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+    
+    # Linha threshold
+    threshold_y = int(y + h - (EAR_THRESHOLD * h * 2))
+    cv2.line(frame, (x, threshold_y), (x+w, threshold_y), HUD_ACCENT_WARNING, 1, cv2.LINE_AA)
+    cv2.putText(frame, "Limite", (x+5, threshold_y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.3, HUD_ACCENT_WARNING, 1, cv2.LINE_AA)
+    
+    # Desenha linha do gráfico
+    points = []
+    step = w / max(1, len(ear_history)-1)
+    for i, ear_val in enumerate(ear_history):
+        px = int(x + i * step)
+        py = int(y + h - (ear_val * h * 2))  # escala
+        py = max(y, min(y+h, py))
+        points.append((px, py))
+    
+    if len(points) > 1:
+        for i in range(len(points)-1):
+            color = HUD_ACCENT_OK if ear_history[i] >= EAR_THRESHOLD else HUD_ACCENT_DANGER
+            cv2.line(frame, points[i], points[i+1], color, 2, cv2.LINE_AA)
+    
+    # Borda
+    draw_rounded_rect(frame, (x, y), (x+w, y+h), (100, 100, 120), 1, radius=5)
+
+def draw_head_orientation(frame, x, y, size, yaw, pitch):
+    """Indicador visual de orientação da cabeça"""
+    center = (x + size//2, y + size//2)
+    radius = size // 2 - 10
+    
+    # Círculo base
+    cv2.circle(frame, center, radius, (60, 60, 80), 2)
+    
+    # Ponto indicando direção
+    yaw_rad = math.radians(-yaw)  # inverte para intuitividade
+    pitch_rad = math.radians(-pitch)
+    
+    offset_x = int(radius * 0.6 * math.sin(yaw_rad))
+    offset_y = int(radius * 0.6 * math.sin(pitch_rad))
+    
+    point = (center[0] + offset_x, center[1] + offset_y)
+    
+    # Cor baseada em desvio
+    deviation = math.sqrt(yaw**2 + pitch**2)
+    if deviation < 15:
+        color = HUD_ACCENT_OK
+    elif deviation < 25:
+        color = HUD_ACCENT_WARNING
+    else:
+        color = HUD_ACCENT_DANGER
+    
+    cv2.line(frame, center, point, color, 3, cv2.LINE_AA)
+    cv2.circle(frame, point, 6, color, -1)
+    
+    # Labels
+    cv2.putText(frame, f"Y:{yaw:.0f}", (x, y+size+15), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (150, 150, 150), 1)
+    cv2.putText(frame, f"P:{pitch:.0f}", (x, y+size+30), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (150, 150, 150), 1)
+
+# -------------------- Loop Principal --------------------
+try:
     while True:
         ret, frame = cap.read()
         if not ret:
-            print("Falha ao capturar frame. Saindo.")
             break
 
         h, w = frame.shape[:2]
@@ -303,8 +376,7 @@ try:
 
         ear_val = None
         eyes_open = False
-        pitch = 0.0
-        yaw = 0.0
+        pitch = yaw = 0.0
         is_phone = False
         phone_score = 0.0
 
@@ -312,20 +384,19 @@ try:
             lm = results.multi_face_landmarks[0]
             landmarks = np.array([[p.x * w, p.y * h] for p in lm.landmark], dtype=np.float32)
 
-            left_eye_pts = landmarks[LEFT_EYE_IDX]
-            right_eye_pts = landmarks[RIGHT_EYE_IDX]
-
-            left_ear = eye_aspect_ratio(left_eye_pts)
-            right_ear = eye_aspect_ratio(right_eye_pts)
-            ear_val = float((left_ear + right_ear) / 2.0)
-
+            # Calcula EAR
+            left_ear = eye_aspect_ratio(landmarks[LEFT_EYE_IDX])
+            right_ear = eye_aspect_ratio(landmarks[RIGHT_EYE_IDX])
+            ear_val = (left_ear + right_ear) / 2.0
+            
             ear_window.append(ear_val)
+            ear_history.append(ear_val)
             ear_smoothed = float(np.mean(ear_window))
 
-            # head pose for decision
+            # Head pose
             yaw, pitch, roll = estimate_head_pose(landmarks, w, h)
 
-            # decide real eye-closed vs head-down (phone)
+            # Detecta olhos fechados (real)
             is_ear_low = ear_smoothed < EAR_THRESHOLD
             is_head_down = pitch > PITCH_CLOSE_THRESHOLD
             is_head_turned = abs(yaw) > YAW_CLOSE_THRESHOLD
@@ -338,88 +409,74 @@ try:
 
             eyes_open = not (consec_closed >= EYE_CLOSED_CONSEC_FRAMES)
 
-            # detect phone/focus loss
-            is_phone, phone_score, phone_reasons, yaw_calc, pitch_calc = detect_not_focused(landmarks, w, h, ear_smoothed)
+            # Detecta phone/desfocado
+            is_phone, phone_score, phone_reasons, _, _ = detect_not_focused(landmarks, w, h, ear_smoothed)
 
-            # draw indicators for phone/focus
-            if is_phone:
-                cv2.putText(frame, f"Desfocado: ({phone_score:.2f})", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,165,255), 2)
-            else:
-                cv2.putText(frame, f"FOCO OK ({phone_score:.2f})", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 1)
+            # ========== NOVO HUD ==========
+            
+            # Painel: Status dos Olhos
+            eye_status = "ABERTOS" if eyes_open else "FECHADOS"
+            eye_color = HUD_ACCENT_OK if eyes_open else HUD_ACCENT_DANGER
+            draw_status_panel(frame, 10, 10, 180, 80, "OLHOS", eye_status, eye_color, f"EAR: {ear_smoothed:.3f}")
 
-            # phone alert timing
+            # Painel: Foco
+            focus_status = "OK" if not is_phone else "DESFOCADO"
+            focus_color = HUD_ACCENT_OK if not is_phone else HUD_ACCENT_WARNING
+            draw_status_panel(frame, 200, 10, 180, 80, "FOCO", focus_status, focus_color, f"Score: {phone_score:.2f}")
+
+            # Painel: Orientação da cabeça
+            draw_head_orientation(frame, 390, 10, 80, yaw, pitch)
+
+            # Gráfico de EAR
+            draw_ear_graph(frame, 10, h-130, 300, 120, ear_history)
+
+            # Alerta de inatividade (barra de progresso)
             now = time.time()
-            if is_phone:
-                if phone_start_time is None:
-                    phone_start_time = now
-                if (now - phone_start_time) >= PHONE_ALERT_SECONDS:
-                    # for phone alert we use the same alert function (you can separate sounds)
-                    play_alert_audio_once()
-            else:
-                phone_start_time = None
-
-            # draw eyes and EAR
-            for (x, y) in np.vstack([left_eye_pts, right_eye_pts]).astype(int):
-                cv2.circle(frame, (int(x), int(y)), 2, (0, 255, 0), -1)
-
-            status_text = f"EAR: {ear_smoothed:.2f}  Open: {eyes_open}"
-            color = (0, 255, 0) if eyes_open else (0, 0, 255)
-            cv2.putText(frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-
-            # face bounding box
-            x_coords = [int(p[0]) for p in landmarks]
-            y_coords = [int(p[1]) for p in landmarks]
-            x1, x2 = min(x_coords), max(x_coords)
-            y1, y2 = min(y_coords), max(y_coords)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 200, 0), 2)
-
-            # ---------- Dormir/inativo detection (tempo real) ----------
             if not eyes_open:
                 if closed_start_time is None:
-                    closed_start_time = time.time()
+                    closed_start_time = now
                     alert_played = False
-                elapsed = time.time() - closed_start_time
-                cv2.putText(frame, f"Inativo: {int(elapsed)}s", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
+                elapsed = now - closed_start_time
+                progress = min(1.0, elapsed / ALERT_SECONDS)
+                
+                # Barra de alerta
+                bar_w = 250
+                bar_x = w - bar_w - 20
+                bar_y = 20
+                draw_progress_bar(frame, bar_x, bar_y, bar_w, 30, progress, HUD_ACCENT_DANGER)
+                cv2.putText(frame, f"INATIVO: {int(elapsed)}s / {ALERT_SECONDS}s", 
+                           (bar_x+5, bar_y+20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
 
                 if elapsed >= ALERT_SECONDS and not alert_played:
-                    # minimize windows if configured
                     if MINIMIZE_WINDOWS_ON_ALERT:
                         try:
                             my_hwnd = GetForegroundWindow()
-                            minimize_all_other_windows(except_hwnd=my_hwnd, exclude_title_contains=None)
+                            minimize_all_other_windows(except_hwnd=my_hwnd)
                         except Exception:
                             pass
 
-                    # play audio once
                     play_alert_audio_once()
 
-                    # create alert fullscreen window (topmost) and blink until eyes open
                     alert_win = "ALERTA - FOQUE!"
                     cv2.namedWindow(alert_win, cv2.WINDOW_NORMAL)
                     cv2.setWindowProperty(alert_win, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-                    for _ in range(8):
-                        set_window_topmost_by_name(alert_win, top=True)
-                        time.sleep(0.03)
 
                     flash_on = True
                     flash_timer = time.time()
 
-                    # alert loop: show blinking overlay + small camera, stop audio when eyes re-open
                     while True:
                         ret2, f2 = cap.read()
                         if not ret2:
                             break
                         rgb2 = cv2.cvtColor(f2, cv2.COLOR_BGR2RGB)
                         res2 = face_mesh.process(rgb2)
-                        ear_now = None
                         eyes_open_now = False
                         if res2.multi_face_landmarks:
                             lm2 = res2.multi_face_landmarks[0]
                             landmarks2 = np.array([[p.x * w, p.y * h] for p in lm2.landmark], dtype=np.float32)
-                            lpts = landmarks2[LEFT_EYE_IDX]; rpts = landmarks2[RIGHT_EYE_IDX]
-                            le = eye_aspect_ratio(lpts); re = eye_aspect_ratio(rpts)
-                            ear_now = (le + re) / 2.0
-                            if ear_now >= EAR_THRESHOLD:
+                            le = eye_aspect_ratio(landmarks2[LEFT_EYE_IDX])
+                            re = eye_aspect_ratio(landmarks2[RIGHT_EYE_IDX])
+                            if (le + re) / 2.0 >= EAR_THRESHOLD:
                                 eyes_open_now = True
 
                         disp = f2.copy()
@@ -432,30 +489,8 @@ try:
                         cv2.putText(disp, "ACORDA!", (int(w2*0.05), int(h2*0.45)),
                                     cv2.FONT_HERSHEY_DUPLEX, 2.0, (255,255,255), 4, cv2.LINE_AA)
 
-                        # small camera preview
                         small = cv2.resize(f2, (int(w2*0.25), int(h2*0.25)))
                         disp[10:10+small.shape[0], 10:10+small.shape[1]] = small
-
-                        # optional alert image on the right
-                        if _alert_img is not None:
-                            try:
-                                ih, iw = _alert_img.shape[:2]
-                                target_w = int(w2 * 0.30)
-                                scale = target_w / max(1, iw)
-                                target_h = int(ih * scale)
-                                resized = cv2.resize(_alert_img, (target_w, target_h))
-                                x_off = w2 - target_w - 40
-                                y_off = int(h2 * 0.25)
-                                if resized.shape[2] == 4:
-                                    alpha_chan = resized[:, :, 3] / 255.0
-                                    for c in range(3):
-                                        disp[y_off:y_off+target_h, x_off:x_off+target_w, c] = (
-                                            alpha_chan * resized[:, :, c] + (1 - alpha_chan) * disp[y_off:y_off+target_h, x_off:x_off+target_w, c]
-                                        ).astype(disp.dtype)
-                                else:
-                                    disp[y_off:y_off+target_h, x_off:x_off+target_w] = resized
-                            except Exception:
-                                pass
 
                         cv2.imshow(alert_win, disp)
 
@@ -463,7 +498,6 @@ try:
                             flash_on = not flash_on
                             flash_timer = time.time()
 
-                        # stop audio immediately when eyes reopen
                         if eyes_open_now:
                             try:
                                 if PYGAME_AVAILABLE and pygame.mixer.get_init():
@@ -473,42 +507,52 @@ try:
                             break
 
                         if cv2.waitKey(1) & 0xFF == ord('q'):
-                            try:
-                                if PYGAME_AVAILABLE and pygame.mixer.get_init():
-                                    pygame.mixer.music.stop()
-                            except Exception:
-                                pass
                             break
 
-                    # close alert window and reset
-                    try:
-                        cv2.destroyWindow(alert_win)
-                        set_window_topmost_by_name(alert_win, top=False)
-                    except Exception:
-                        pass
+                    cv2.destroyWindow(alert_win)
                     closed_start_time = None
                     alert_played = False
             else:
                 closed_start_time = None
                 alert_played = False
 
+            # Phone alert timing
+            if is_phone:
+                if phone_start_time is None:
+                    phone_start_time = now
+                phone_elapsed = now - phone_start_time
+                if phone_elapsed >= PHONE_ALERT_SECONDS:
+                    play_alert_audio_once()
+                else:
+                    # Barra de phone warning
+                    phone_progress = phone_elapsed / PHONE_ALERT_SECONDS
+                    bar_w = 200
+                    bar_x = w - bar_w - 20
+                    bar_y = 60
+                    draw_progress_bar(frame, bar_x, bar_y, bar_w, 20, phone_progress, HUD_ACCENT_WARNING)
+                    cv2.putText(frame, f"Celular: {int(phone_elapsed)}s", 
+                               (bar_x+5, bar_y+15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            else:
+                phone_start_time = None
+
         else:
-            # no face found: reset some state
+            # Sem rosto detectado
+            cv2.putText(frame, "ROSTO NAO DETECTADO", (w//2-150, h//2), 
+                       cv2.FONT_HERSHEY_DUPLEX, 0.8, HUD_ACCENT_DANGER, 2, cv2.LINE_AA)
             ear_window.clear()
             consec_closed = 0
             closed_start_time = None
             alert_played = False
-            cv2.putText(frame, "Rosto nao detectado", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
 
-        # main small window
         cv2.imshow("Face+Eyes Detector", frame)
 
-        # logging for later calibration
+        # Logging
         if ear_val is not None:
             try:
                 with open(LOG_CSV, "a", newline="", encoding="utf-8") as f:
                     writer = csv.writer(f)
-                    writer.writerow([datetime.utcnow().isoformat(), f"{ear_val:.4f}", f"{pitch:.2f}", f"{yaw:.2f}", int(is_phone), int(eyes_open)])
+                    writer.writerow([datetime.utcnow().isoformat(), f"{ear_val:.4f}", 
+                                   f"{pitch:.2f}", f"{yaw:.2f}", int(is_phone), int(eyes_open)])
             except Exception:
                 pass
 
